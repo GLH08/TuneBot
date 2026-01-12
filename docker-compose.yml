@@ -1,0 +1,9 @@
+services:
+  tunebot:
+    build: .
+    container_name: tunebot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

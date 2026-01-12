@@ -1,0 +1,17 @@
+services:
+  tunebot:
+    image: ghcr.io/glh08/tunebot:latest
+    container_name: tunebot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ARCHIVE_CHANNEL_ID=${ARCHIVE_CHANNEL_ID}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
+      - DEFAULT_QUALITY=${DEFAULT_QUALITY:-320k}
+      - API_BASE_URL=${API_BASE_URL:-https://music-dl.sayqz.com}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - tunebot_data:/app/data
+
+volumes:
+  tunebot_data:
