@@ -75,6 +75,8 @@ PYROGRAM_ENABLED = False
 if TELEGRAM_API_ID and TELEGRAM_API_HASH:
     try:
         from pyrogram import Client
+        # 设置 Pyrogram 日志级别为 WARNING，避免 DEBUG 输出大量二进制数据
+        logging.getLogger("pyrogram").setLevel(logging.WARNING)
         # 确保 workdir 存在
         pyrogram_workdir = Path(tempfile.gettempdir()) / "tunebot_pyrogram"
         pyrogram_workdir.mkdir(parents=True, exist_ok=True)
@@ -608,7 +610,8 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
     elif file_id and ARCHIVE_CHANNEL_ID:
         # Pyrogram 上传后需要单独归档
         try:
-            archive_caption = make_hashtags(info.name, info.artist, info.album, source)
+            archive_hashtags = make_hashtags(info.name, info.artist, info.album, source)
+            archive_caption = caption + "\n\n" + archive_hashtags if archive_hashtags else caption
             await context.bot.send_audio(
                 chat_id=ARCHIVE_CHANNEL_ID,
                 audio=file_id,
