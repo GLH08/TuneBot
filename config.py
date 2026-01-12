@@ -8,6 +8,10 @@ BASE_DIR = Path(__file__).parent
 # Telegram Bot Token
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
+# Telegram API (用于大文件上传，从 https://my.telegram.org 获取)
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
+
 # 归档频道 ID
 _archive_id = os.getenv("ARCHIVE_CHANNEL_ID", "")
 ARCHIVE_CHANNEL_ID = None

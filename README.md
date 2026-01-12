@@ -56,11 +56,24 @@ docker compose up -d --build
 | 变量 | 说明 | 必填 |
 |------|------|------|
 | `BOT_TOKEN` | Telegram Bot Token（从 @BotFather 获取） | ✅ |
+| `TELEGRAM_API_ID` | Telegram API ID（从 https://my.telegram.org 获取，用于解除 50MB 限制） | ❌ |
+| `TELEGRAM_API_HASH` | Telegram API Hash（从 https://my.telegram.org 获取） | ❌ |
 | `ARCHIVE_CHANNEL_ID` | 归档频道 ID（以 -100 开头） | ❌ |
 | `ALLOWED_USER_IDS` | 允许使用的用户 ID，多个用逗号分隔 | ❌ |
 | `DEFAULT_QUALITY` | 默认音质：128k, 320k, flac, flac24bit | ❌ |
 | `API_BASE_URL` | TuneHub API 地址 | ❌ |
 | `LOG_LEVEL` | 日志级别：DEBUG, INFO, WARNING, ERROR | ❌ |
+
+### 大文件上传（解除 50MB 限制）
+
+默认情况下，Telegram Bot API 限制文件大小为 50MB。如需上传更大的文件（如 FLAC 24bit），请配置：
+
+1. 访问 https://my.telegram.org 登录
+2. 进入 "API development tools"
+3. 创建应用获取 `API_ID` 和 `API_HASH`
+4. 在 `.env` 中配置这两个变量
+
+配置后可上传最大 2GB 的文件。
 
 ## 使用方法
 
@@ -125,6 +138,7 @@ python bot.py
 
 - Python 3.10+
 - python-telegram-bot 20+
+- Pyrogram (用于大文件上传)
 - aiohttp
 - aiosqlite
 - TuneHub API

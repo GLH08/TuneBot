@@ -7,7 +7,9 @@ import logging
 import io
 import re
 import asyncio
+import tempfile
 from uuid import uuid4
+from pathlib import Path
 
 from telegram import (
     Update,
@@ -33,6 +35,8 @@ from config import (
     VALID_QUALITIES,
     PLATFORMS,
     MAX_FILE_SIZE,
+    TELEGRAM_API_ID,
+    TELEGRAM_API_HASH,
 )
 from utils import (
     client,
@@ -64,6 +68,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Pyrogram 客户端（用于大文件上传）
+pyrogram_client = None
+PYROGRAM_ENABLED = False
+
+if TELEGRAM_API_ID and TELEGRAM_API_HASH:
+    try:
+        from pyrogram import Client
+        # 确保 workdir 存在
+        pyrogram_workdir = Path(tempfile.gettempdir()) / "tunebot_pyrogram"
+        pyrogram_workdir.mkdir(parents=True, exist_ok=True)
+        pyrogram_client = Client(
+            "tunebot_uploader",
+            api_id=int(TELEGRAM_API_ID),
+            api_hash=TELEGRAM_API_HASH,
+            bot_token=BOT_TOKEN,
+            workdir=str(pyrogram_workdir)
+        )
+        PYROGRAM_ENABLED = True
+        logger.info("Pyrogram 大文件上传已启用")
+    except Exception as e:
+        logger.warning(f"Pyrogram 初始化失败: {e}，将使用标准 Bot API（50MB 限制）")
+
 # 用户设置缓存
 user_quality: dict[int, str] = {}
 
@@ -75,6 +101,52 @@ def get_file_extension(quality: str) -> str:
     if quality in ("flac", "flac24bit"):
         return ".flac"
     return ".mp3"
+
+
+async def upload_large_audio(
+    chat_id: int,
+    audio_bytes: bytes,
+    filename: str,
+    title: str,
+    performer: str,
+    caption: str,
+    cover_bytes: bytes = b""
+) -> str:
+    """使用 Pyrogram 上传大文件，返回 file_id"""
+    if not PYROGRAM_ENABLED or not pyrogram_client:
+        raise RuntimeError("Pyrogram 未启用")
+
+    # 创建临时文件
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as audio_file:
+        audio_file.write(audio_bytes)
+        audio_path = audio_file.name
+
+    thumb_path = None
+    if cover_bytes:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as thumb_file:
+            thumb_file.write(cover_bytes)
+            thumb_path = thumb_file.name
+
+    try:
+        async with pyrogram_client:
+            msg = await pyrogram_client.send_audio(
+                chat_id=chat_id,
+                audio=audio_path,
+                thumb=thumb_path,
+                title=title,
+                performer=performer,
+                caption=caption,
+                file_name=filename
+            )
+            return msg.audio.file_id if msg.audio else ""
+    finally:
+        # 清理临时文件
+        try:
+            os.unlink(audio_path)
+            if thumb_path:
+                os.unlink(thumb_path)
+        except Exception:
+            pass
 
 
 # ==================== 鉴权 ====================
@@ -428,16 +500,24 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
 
     await query.edit_message_text(f"⏳ 正在下载: {info.name} - {info.artist}...")
 
-    # 获取音频
-    audio_result = await client.get_audio_with_fallback(source, song_id, quality)
+    # 获取音频（如果启用了 Pyrogram，跳过文件大小检查，但保留音质不可用时的降级）
+    audio_result = await client.get_audio_with_fallback(
+        source, song_id, quality,
+        skip_size_check=PYROGRAM_ENABLED
+    )
+
     if not audio_result.success:
         await query.edit_message_text(f"❌ 下载失败: {audio_result.error}")
         return
 
-    # 检查是否超限需要发链接
-    if audio_result.need_fallback and audio_result.size > MAX_FILE_SIZE:
+    # 使用实际音质
+    actual_quality = audio_result.actual_quality or quality
+
+    # 如果未启用 Pyrogram 且文件过大，发送链接
+    if not PYROGRAM_ENABLED and audio_result.size > MAX_FILE_SIZE:
         await query.edit_message_text(
-            f"📎 文件过大 ({format_file_size(audio_result.size)})，请直接下载:\n{audio_result.url}"
+            f"📎 文件过大 ({format_file_size(audio_result.size)})，请直接下载:\n{audio_result.url}\n\n"
+            f"💡 提示：配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH 可解除 50MB 限制"
         )
         return
 
@@ -476,37 +556,67 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
         info.name,
         info.artist,
         info.album,
-        quality,
-        audio_result.size,
+        actual_quality,
+        len(audio_bytes),
         source,
         audio_result.source_switched
     )
 
-    # 根据音质确定文件扩展名
-    ext = get_file_extension(quality)
+    # 根据实际音质确定文件扩展名
+    ext = get_file_extension(actual_quality)
     filename = f"{info.name} - {info.artist}{ext}"
 
+    file_id = ""
     try:
-        sent_msg = await context.bot.send_audio(
-            chat_id=query.message.chat_id,
-            audio=io.BytesIO(audio_bytes),
-            thumbnail=io.BytesIO(cover_bytes) if cover_bytes else None,
-            title=info.name,
-            performer=info.artist,
-            caption=caption,
-            filename=filename
-        )
+        # 根据文件大小选择上传方式
+        if len(audio_bytes) > MAX_FILE_SIZE and PYROGRAM_ENABLED:
+            # 大文件使用 Pyrogram 上传
+            await query.edit_message_text(f"📤 上传大文件中 ({format_file_size(len(audio_bytes))})...")
+            file_id = await upload_large_audio(
+                chat_id=query.message.chat_id,
+                audio_bytes=audio_bytes,
+                filename=filename,
+                title=info.name,
+                performer=info.artist,
+                caption=caption,
+                cover_bytes=cover_bytes
+            )
+            sent_msg = None  # Pyrogram 发送的消息，归档需要单独处理
+        else:
+            # 普通文件使用 python-telegram-bot
+            sent_msg = await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=io.BytesIO(audio_bytes),
+                thumbnail=io.BytesIO(cover_bytes) if cover_bytes else None,
+                title=info.name,
+                performer=info.artist,
+                caption=caption,
+                filename=filename
+            )
+            file_id = sent_msg.audio.file_id if sent_msg and sent_msg.audio else ""
     except Exception as e:
         logger.error(f"发送音频失败: {e}")
         await query.edit_message_text(f"❌ 发送失败: {e}")
         return
 
-    # 保存历史记录
-    file_id = sent_msg.audio.file_id if sent_msg.audio else ""
-    await add_history(source, song_id, info.name, info.artist, info.album, quality, file_id)
+    # 保存历史记录（使用实际音质）
+    await add_history(source, song_id, info.name, info.artist, info.album, actual_quality, file_id)
 
     # 归档到频道
-    await archive_to_channel(context, sent_msg, source)
+    if sent_msg:
+        await archive_to_channel(context, sent_msg, source)
+    elif file_id and ARCHIVE_CHANNEL_ID:
+        # Pyrogram 上传后需要单独归档
+        try:
+            archive_caption = make_hashtags(info.name, info.artist, info.album, source)
+            await context.bot.send_audio(
+                chat_id=ARCHIVE_CHANNEL_ID,
+                audio=file_id,
+                caption=archive_caption
+            )
+            logger.info(f"归档成功: {info.name}")
+        except Exception as e:
+            logger.warning(f"归档失败: {e}")
 
     # 更新消息，显示收藏按钮
     is_fav = await is_favorite(source, song_id)
@@ -516,7 +626,7 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
         fav_btn = InlineKeyboardButton("❤️ 收藏", callback_data=f"addfav|{source}|{song_id}")
 
     await query.edit_message_text(
-        f"✅ 下载完成: {info.name} - {info.artist}",
+        f"✅ 下载完成: {info.name} - {info.artist}\n📊 音质: {actual_quality}",
         reply_markup=InlineKeyboardMarkup([[fav_btn]])
     )
 

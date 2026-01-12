@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
       - ARCHIVE_CHANNEL_ID=${ARCHIVE_CHANNEL_ID}
       - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
       - DEFAULT_QUALITY=${DEFAULT_QUALITY:-320k}

@@ -33,6 +33,7 @@ class AudioResult:
     source_switched: str = ""  # 换源信息
     error: str = ""
     need_fallback: bool = False  # 是否需要降级
+    actual_quality: str = ""  # 实际使用的音质
 
 
 class TuneHubClient:
@@ -211,22 +212,30 @@ class TuneHubClient:
         self,
         source: str,
         song_id: str,
-        quality: str = "320k"
+        quality: str = "320k",
+        skip_size_check: bool = False
     ) -> AudioResult:
-        """获取音频，超限或不可用时自动降级"""
+        """获取音频，超限或不可用时自动降级
+
+        Args:
+            source: 音源平台
+            song_id: 歌曲 ID
+            quality: 请求的音质
+            skip_size_check: 是否跳过文件大小检查（启用大文件上传时使用）
+        """
         # 品质降级顺序
         quality_order = ["flac24bit", "flac", "320k", "128k"]
 
         result = await self.resolve_audio_url(source, song_id, quality)
 
-        # 如果成功但需要降级（文件太大）
-        if result.success and result.need_fallback:
+        # 如果成功但需要降级（文件太大），且未跳过大小检查
+        if result.success and result.need_fallback and not skip_size_check:
             try:
                 current_idx = quality_order.index(quality)
                 if current_idx < len(quality_order) - 1:
                     next_quality = quality_order[current_idx + 1]
                     logger.info(f"文件过大，降级到 {next_quality}")
-                    return await self.get_audio_with_fallback(source, song_id, next_quality)
+                    return await self.get_audio_with_fallback(source, song_id, next_quality, skip_size_check)
             except ValueError:
                 pass
 
@@ -237,59 +246,84 @@ class TuneHubClient:
                 if current_idx < len(quality_order) - 1:
                     next_quality = quality_order[current_idx + 1]
                     logger.info(f"品质 {quality} 不可用，降级到 {next_quality}")
-                    return await self.get_audio_with_fallback(source, song_id, next_quality)
+                    return await self.get_audio_with_fallback(source, song_id, next_quality, skip_size_check)
             except ValueError:
                 pass
+
+        # 设置实际使用的音质
+        if result.success:
+            result.actual_quality = quality
 
         return result
 
     async def download_audio(
         self,
         url: str,
-        progress_callback=None
+        progress_callback=None,
+        max_retries: int = 3,
+        timeout: int = 180
     ) -> bytes:
-        """下载音频内容，支持进度回调
+        """下载音频内容，支持进度回调和自动重试
 
         Args:
             url: 音频 URL
             progress_callback: 可选的进度回调函数 async def callback(downloaded, total)
+            max_retries: 最大重试次数
+            timeout: 下载超时时间（秒）
         """
-        try:
-            logger.debug(f"开始下载: {url[:100]}...")
-            session = await self._get_session()
+        # 某些源可能需要特定的 headers
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        if "kuwo" in url.lower():
+            headers["Referer"] = "https://www.kuwo.cn/"
+        elif "kugou" in url.lower():
+            headers["Referer"] = "https://www.kugou.com/"
 
-            # 某些源可能需要特定的 headers
-            headers = {}
-            if "kuwo" in url.lower():
-                headers["Referer"] = "https://www.kuwo.cn/"
-            elif "kugou" in url.lower():
-                headers["Referer"] = "https://www.kugou.com/"
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.debug(f"开始下载 (尝试 {attempt}/{max_retries}): {url[:100]}...")
 
-            async with session.get(url, headers=headers if headers else None) as resp:
-                if resp.status != 200:
-                    logger.warning(f"下载失败: HTTP {resp.status}, url={url[:100]}")
-                    return b""
+                # 使用独立的超时配置
+                download_timeout = aiohttp.ClientTimeout(total=timeout, connect=30)
+                async with aiohttp.ClientSession(timeout=download_timeout) as download_session:
+                    async with download_session.get(url, headers=headers) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"下载失败: HTTP {resp.status}, url={url[:100]}")
+                            if attempt < max_retries:
+                                await asyncio.sleep(2)
+                                continue
+                            return b""
 
-                total = int(resp.headers.get("Content-Length", 0))
-                logger.debug(f"文件大小: {total} bytes")
-                downloaded = 0
-                chunks = []
+                        total = int(resp.headers.get("Content-Length", 0))
+                        logger.debug(f"文件大小: {total} bytes")
+                        downloaded = 0
+                        chunks = []
 
-                async for chunk in resp.content.iter_chunked(64 * 1024):  # 64KB chunks
-                    chunks.append(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and total > 0:
-                        await progress_callback(downloaded, total)
+                        async for chunk in resp.content.iter_chunked(64 * 1024):  # 64KB chunks
+                            chunks.append(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback and total > 0:
+                                await progress_callback(downloaded, total)
 
-                result = b"".join(chunks)
-                logger.debug(f"下载完成: {len(result)} bytes")
-                return result
-        except asyncio.TimeoutError:
-            logger.warning(f"下载超时: {url[:100]}")
-            return b""
-        except Exception as e:
-            logger.warning(f"下载音频失败: {type(e).__name__}: {e}", exc_info=True)
-            return b""
+                        result = b"".join(chunks)
+                        logger.debug(f"下载完成: {len(result)} bytes")
+                        return result
+
+            except asyncio.TimeoutError:
+                logger.warning(f"下载超时 (尝试 {attempt}/{max_retries}): {url[:100]}")
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
+                    continue
+                return b""
+            except Exception as e:
+                logger.warning(f"下载失败 (尝试 {attempt}/{max_retries}): {type(e).__name__}: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
+                    continue
+                return b""
+
+        return b""
 
     async def get_cover(self, source: str, song_id: str) -> bytes:
         """获取封面图片"""
