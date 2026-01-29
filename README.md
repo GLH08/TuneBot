@@ -2,6 +2,8 @@
 
 Telegram 音乐搜索与归档机器人，支持多平台音源聚合搜索、下载，并自动归档到私人频道。
 
+基于 [TuneHub API V3](https://tunehub.sayqz.com) 提供音乐解析服务。
+
 ## 功能特性
 
 - 🔍 **聚合搜索** - 支持网易云、酷我、QQ音乐等多平台搜索
@@ -25,6 +27,7 @@ mkdir tunebot && cd tunebot
 # 创建 .env 文件
 cat > .env << 'EOF'
 BOT_TOKEN=your_bot_token_here
+API_KEY=your_tunehub_api_key
 ARCHIVE_CHANNEL_ID=-100xxxxxxxxxx
 ALLOWED_USER_IDS=your_user_id
 DEFAULT_QUALITY=320k
@@ -56,12 +59,13 @@ docker compose up -d --build
 | 变量 | 说明 | 必填 |
 |------|------|------|
 | `BOT_TOKEN` | Telegram Bot Token（从 @BotFather 获取） | ✅ |
+| `API_KEY` | TuneHub API Key（从 https://tunehub.sayqz.com 获取） | ✅ |
 | `TELEGRAM_API_ID` | Telegram API ID（从 https://my.telegram.org 获取，用于解除 50MB 限制） | ❌ |
 | `TELEGRAM_API_HASH` | Telegram API Hash（从 https://my.telegram.org 获取） | ❌ |
 | `ARCHIVE_CHANNEL_ID` | 归档频道 ID（以 -100 开头） | ❌ |
 | `ALLOWED_USER_IDS` | 允许使用的用户 ID，多个用逗号分隔 | ❌ |
 | `DEFAULT_QUALITY` | 默认音质：128k, 320k, flac, flac24bit | ❌ |
-| `API_BASE_URL` | TuneHub API 地址 | ❌ |
+| `API_BASE_URL` | TuneHub API 地址（默认 https://tunehub.sayqz.com/api） | ❌ |
 | `LOG_LEVEL` | 日志级别：DEBUG, INFO, WARNING, ERROR | ❌ |
 
 ### 大文件上传（解除 50MB 限制）
@@ -141,7 +145,8 @@ python bot.py
 - Pyrogram (用于大文件上传)
 - aiohttp
 - aiosqlite
-- TuneHub API
+- execjs (用于 API 响应转换)
+- TuneHub API V3
 
 ## 许可证
 

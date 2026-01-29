@@ -1,4 +1,5 @@
 """TuneBot 消息格式化工具"""
+import re
 from config import PLATFORMS
 
 
@@ -48,12 +49,13 @@ def format_song_caption(
     return "\n".join(lines)
 
 
-def format_search_result(result: dict, index: int) -> str:
+def format_search_result(result, index: int) -> str:
     """格式化搜索结果显示"""
-    name = result.get("name", "未知")
-    artist = result.get("artist", "未知")
-    platform = format_platform(result.get("platform", ""))
-    return f"{index}. {name} - {artist} [{platform}]"
+    # 支持 SearchResult 对象和字典
+    name = getattr(result, 'name', None) or result.get("name", "未知") if hasattr(result, 'get') else "未知"
+    artist = getattr(result, 'artist', None) or result.get("artist", "未知") if hasattr(result, 'get') else "未知"
+    platform = getattr(result, 'platform', None) or result.get("platform", "") if hasattr(result, 'get') else ""
+    return f"{index}. {name} - {artist} [{format_platform(platform)}]"
 
 
 def format_favorite_item(item: dict, index: int) -> str:
@@ -74,8 +76,9 @@ def format_history_item(item: dict, index: int) -> str:
 
 def format_toplist_item(item: dict, index: int) -> str:
     """格式化排行榜项"""
-    name = item.get("name", "未知")
-    update = item.get("updateFrequency", "")
+    # 支持 ToplistItem 对象和字典
+    name = getattr(item, 'name', None) or item.get("name", "未知") if hasattr(item, 'get') else "未知"
+    update = getattr(item, 'update_frequency', None) or item.get("updateFrequency", "") if hasattr(item, 'get') else ""
     if update:
         return f"{index}. {name} ({update})"
     return f"{index}. {name}"
@@ -121,7 +124,6 @@ def make_hashtags(
 
     # 歌手标签（支持多歌手分隔）
     if artist:
-        import re
         # 按常见分隔符拆分：、/ , & feat. ft.
         artists = re.split(r'[、/,&]|feat\.|ft\.', artist, flags=re.IGNORECASE)
         for a in artists:

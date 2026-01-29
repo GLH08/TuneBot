@@ -31,8 +31,9 @@ if _allowed_ids.strip():
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "320k")
 VALID_QUALITIES = {"128k", "320k", "flac", "flac24bit"}
 
-# TuneHub API
-API_BASE_URL = os.getenv("API_BASE_URL", "https://music-dl.sayqz.com")
+# TuneHub API V3
+API_BASE_URL = os.getenv("API_BASE_URL", "https://tunehub.sayqz.com/api")
+API_KEY = os.getenv("API_KEY", "")
 
 # 数据库路径
 DB_PATH = BASE_DIR / "data" / "tunebot.db"

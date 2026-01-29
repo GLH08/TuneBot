@@ -10,7 +10,10 @@ from config import DB_PATH
 async def init_db():
     """初始化数据库表"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, isolation_level=None) as db:
+        # 启用 WAL 模式，提升并发性能
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")  # 平衡性能和数据安全
         await db.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,5 +1,11 @@
 """TuneBot utils 模块"""
-from utils.api_client import client, TuneHubClient, SongInfo, AudioResult
+from utils.api_client import (
+    client,
+    TuneHubClient,
+    SearchResult,
+    ParseResult,
+    ToplistItem,
+)
 from utils.formatters import (
     format_file_size,
     format_platform,
@@ -30,8 +36,9 @@ __all__ = [
     # API 客户端
     "client",
     "TuneHubClient",
-    "SongInfo",
-    "AudioResult",
+    "SearchResult",
+    "ParseResult",
+    "ToplistItem",
     # 格式化
     "format_file_size",
     "format_platform",

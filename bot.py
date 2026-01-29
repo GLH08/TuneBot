@@ -238,10 +238,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = results[:10]
     buttons = []
     for r in results:
-        name = r.get("name", "未知")[:20]
-        artist = r.get("artist", "未知")[:15]
-        source = r.get("platform", "")
-        song_id = r.get("id", "")
+        name = r.name[:20]
+        artist = r.artist[:15]
+        source = r.platform
+        song_id = r.id
         btn_text = f"{name} - {artist} [{format_platform(source)}]"
         callback_data = f"dl|{source}|{song_id}"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
@@ -467,15 +467,18 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
     user_id = query.from_user.id
     quality = user_quality.get(user_id, DEFAULT_QUALITY)
 
-    await query.edit_message_text("⏳ 正在获取歌曲信息...")
+    await query.edit_message_text("⏳ 正在解析歌曲...")
 
     # 检查历史记录是否有 file_id 可复用
     history = await find_history_by_song(source, song_id)
     if history and history.get("file_id"):
         await query.edit_message_text("📤 发送中 (从缓存)...")
         try:
-            # 获取封面用于缩略图
-            cover_bytes = await client.get_cover(source, song_id)
+            # 获取封面用于缩略图（需要先解析获取封面 URL）
+            parse_result = await client.parse_songs(source, song_id, quality)
+            cover_bytes = b""
+            if parse_result and parse_result[0].cover:
+                cover_bytes = await client.download_bytes(parse_result[0].cover)
             sent_msg = await context.bot.send_audio(
                 chat_id=query.message.chat_id,
                 audio=history["file_id"],
@@ -494,31 +497,20 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
         except Exception as e:
             logger.warning(f"file_id 复用失败: {e}")
 
-    # 获取歌曲信息
-    info = await client.get_song_info(source, song_id)
-    if not info:
-        await query.edit_message_text("❌ 获取歌曲信息失败")
+    # 使用 V3 API 解析歌曲
+    parse_results = await client.parse_songs(source, song_id, quality)
+    if not parse_results or not parse_results[0].success:
+        error_msg = parse_results[0].error if parse_results else "解析失败"
+        await query.edit_message_text(f"❌ 解析失败: {error_msg}")
         return
 
-    await query.edit_message_text(f"⏳ 正在下载: {info.name} - {info.artist}...")
+    result = parse_results[0]
+    await query.edit_message_text(f"⏳ 正在下载: {result.name} - {result.artist}...")
 
-    # 获取音频（如果启用了 Pyrogram，跳过文件大小检查，但保留音质不可用时的降级）
-    audio_result = await client.get_audio_with_fallback(
-        source, song_id, quality,
-        skip_size_check=PYROGRAM_ENABLED
-    )
-
-    if not audio_result.success:
-        await query.edit_message_text(f"❌ 下载失败: {audio_result.error}")
-        return
-
-    # 使用实际音质
-    actual_quality = audio_result.actual_quality or quality
-
-    # 如果未启用 Pyrogram 且文件过大，发送链接
-    if not PYROGRAM_ENABLED and audio_result.size > MAX_FILE_SIZE:
+    # 检查文件大小
+    if not PYROGRAM_ENABLED and result.file_size > MAX_FILE_SIZE:
         await query.edit_message_text(
-            f"📎 文件过大 ({format_file_size(audio_result.size)})，请直接下载:\n{audio_result.url}\n\n"
+            f"📎 文件过大 ({format_file_size(result.file_size)})，请直接下载:\n{result.url}\n\n"
             f"💡 提示：配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH 可解除 50MB 限制"
         )
         return
@@ -535,38 +527,43 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
             progress_bar = "▓" * (percent // 10) + "░" * (10 - percent // 10)
             try:
                 await query.edit_message_text(
-                    f"⏳ 下载中: {info.name}\n"
+                    f"⏳ 下载中: {result.name}\n"
                     f"{progress_bar} {percent}%\n"
                     f"📦 {format_file_size(downloaded)} / {format_file_size(total)}"
                 )
             except Exception:
                 pass  # 忽略编辑失败（如消息内容相同）
 
-    await query.edit_message_text(f"⏳ 开始下载: {info.name}...")
-    audio_bytes = await client.download_audio(audio_result.url, progress_callback)
+    await query.edit_message_text(f"⏳ 开始下载: {result.name}...")
+    audio_bytes = await client.download_audio(result.url, progress_callback)
     if not audio_bytes:
         await query.edit_message_text("❌ 下载音频失败")
         return
 
     # 获取封面
-    cover_bytes = await client.get_cover(source, song_id)
+    cover_bytes = await client.download_bytes(result.cover) if result.cover else b""
 
     await query.edit_message_text("📤 发送中...")
 
+    # 构建换源提示
+    source_switched = ""
+    if result.was_downgraded:
+        source_switched = f"🔄 音质已从 {quality} 降级到 {result.actual_quality}"
+
     # 发送音频
     caption = format_song_caption(
-        info.name,
-        info.artist,
-        info.album,
-        actual_quality,
+        result.name,
+        result.artist,
+        result.album,
+        result.actual_quality,
         len(audio_bytes),
         source,
-        audio_result.source_switched
+        source_switched
     )
 
     # 根据实际音质确定文件扩展名
-    ext = get_file_extension(actual_quality)
-    filename = f"{info.name} - {info.artist}{ext}"
+    ext = get_file_extension(result.actual_quality)
+    filename = f"{result.name} - {result.artist}{ext}"
 
     file_id = ""
     try:
@@ -578,8 +575,8 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
                 chat_id=query.message.chat_id,
                 audio_bytes=audio_bytes,
                 filename=filename,
-                title=info.name,
-                performer=info.artist,
+                title=result.name,
+                performer=result.artist,
                 caption=caption,
                 cover_bytes=cover_bytes
             )
@@ -590,8 +587,8 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
                 chat_id=query.message.chat_id,
                 audio=io.BytesIO(audio_bytes),
                 thumbnail=io.BytesIO(cover_bytes) if cover_bytes else None,
-                title=info.name,
-                performer=info.artist,
+                title=result.name,
+                performer=result.artist,
                 caption=caption,
                 filename=filename
             )
@@ -601,8 +598,8 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
         await query.edit_message_text(f"❌ 发送失败: {e}")
         return
 
-    # 保存历史记录（使用实际音质）
-    await add_history(source, song_id, info.name, info.artist, info.album, actual_quality, file_id)
+    # 保存历史记录
+    await add_history(source, song_id, result.name, result.artist, result.album, result.actual_quality, file_id)
 
     # 归档到频道
     if sent_msg:
@@ -610,14 +607,14 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
     elif file_id and ARCHIVE_CHANNEL_ID:
         # Pyrogram 上传后需要单独归档
         try:
-            archive_hashtags = make_hashtags(info.name, info.artist, info.album, source)
+            archive_hashtags = make_hashtags(result.name, result.artist, result.album, source)
             archive_caption = caption + "\n\n" + archive_hashtags if archive_hashtags else caption
             await context.bot.send_audio(
                 chat_id=ARCHIVE_CHANNEL_ID,
                 audio=file_id,
                 caption=archive_caption
             )
-            logger.info(f"归档成功: {info.name}")
+            logger.info(f"归档成功: {result.name}")
         except Exception as e:
             logger.warning(f"归档失败: {e}")
 
@@ -629,7 +626,7 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, so
         fav_btn = InlineKeyboardButton("❤️ 收藏", callback_data=f"addfav|{source}|{song_id}")
 
     await query.edit_message_text(
-        f"✅ 下载完成: {info.name} - {info.artist}\n📊 音质: {actual_quality}",
+        f"✅ 下载完成: {result.name} - {result.artist}\n📊 音质: {result.actual_quality}",
         reply_markup=InlineKeyboardMarkup([[fav_btn]])
     )
 
@@ -650,11 +647,13 @@ async def handle_quality_change(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_add_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, source: str, song_id: str):
     """添加收藏"""
     query = update.callback_query
-    info = await client.get_song_info(source, song_id)
-    if info:
-        await add_favorite(source, song_id, info.name, info.artist, info.album)
+    # 使用 V3 API 解析获取歌曲信息
+    parse_results = await client.parse_songs(source, song_id, "320k")
+    if parse_results and parse_results[0].success:
+        result = parse_results[0]
+        await add_favorite(source, song_id, result.name, result.artist, result.album)
         await query.edit_message_text(
-            f"❤️ 已收藏: {info.name} - {info.artist}",
+            f"❤️ 已收藏: {result.name} - {result.artist}",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("💔 取消收藏", callback_data=f"delfav|{source}|{song_id}")
             ]])
@@ -694,8 +693,8 @@ async def handle_toplists(update: Update, context: ContextTypes.DEFAULT_TYPE, so
 
     buttons = []
     for item in toplists[:15]:
-        list_id = item.get("id", "")
-        name = item.get("name", "未知")[:25]
+        list_id = item.id
+        name = item.name[:25]
         buttons.append([InlineKeyboardButton(name, callback_data=f"toplist|{source}|{list_id}")])
 
     # 返回按钮
@@ -713,8 +712,7 @@ async def handle_toplist_songs(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.edit_message_text("⏳ 获取榜单歌曲...")
 
-    data = await client.get_toplist_songs(source, list_id)
-    songs = data.get("list", [])
+    songs = await client.get_toplist_songs(source, list_id)
     if not songs:
         await query.edit_message_text("❌ 获取榜单歌曲失败")
         return
@@ -723,9 +721,9 @@ async def handle_toplist_songs(update: Update, context: ContextTypes.DEFAULT_TYP
     songs = songs[:20]
     buttons = []
     for song in songs:
-        song_id = song.get("id", "")
-        name = song.get("name", "未知")[:20]
-        artist = song.get("artist", "")[:10] if song.get("artist") else ""
+        song_id = song.id
+        name = song.name[:20]
+        artist = song.artist[:10] if song.artist else ""
         btn_text = f"{name} - {artist}" if artist else name
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"dl|{source}|{song_id}")])
 
@@ -771,7 +769,10 @@ async def handle_resend(update: Update, context: ContextTypes.DEFAULT_TYPE, hist
 
     try:
         # 获取封面用于缩略图
-        cover_bytes = await client.get_cover(history["source"], history["song_id"])
+        cover_bytes = b""
+        parse_results = await client.parse_songs(history["source"], history["song_id"], "320k")
+        if parse_results and parse_results[0].cover:
+            cover_bytes = await client.download_bytes(parse_results[0].cover)
         sent_msg = await context.bot.send_audio(
             chat_id=query.message.chat_id,
             audio=file_id,
@@ -859,10 +860,10 @@ async def inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 构建结果列表
     inline_results = []
     for r in results[:10]:
-        song_id = r.get("id", "")
-        source = r.get("platform", "")
-        name = r.get("name", "未知")
-        artist = r.get("artist", "未知")
+        song_id = r.id
+        source = r.platform
+        name = r.name
+        artist = r.artist
 
         # 使用 Article 类型，点击后发送下载指令
         inline_results.append(

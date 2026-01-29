@@ -1,47 +1,63 @@
-"""TuneBot API 客户端 - TuneHub API 封装"""
+"""TuneBot API 客户端 - TuneHub V3 API 封装"""
 import asyncio
 import aiohttp
 import logging
+import execjs
 from typing import Optional
 from dataclasses import dataclass
 
-from config import API_BASE_URL, MAX_FILE_SIZE
+from config import API_BASE_URL, API_KEY, MAX_FILE_SIZE, PLATFORMS
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class SongInfo:
-    """歌曲信息"""
-    source: str
-    song_id: str
+class SearchResult:
+    """搜索结果"""
+    id: str
     name: str
     artist: str
     album: str = ""
-    pic_url: str = ""
-    lrc_url: str = ""
-    url: str = ""
+    platform: str = ""
 
 
 @dataclass
-class AudioResult:
-    """音频获取结果"""
+class ParseResult:
+    """解析结果"""
     success: bool
+    song_id: str
+    name: str = ""
+    artist: str = ""
+    album: str = ""
     url: str = ""
-    size: int = 0
-    content: bytes = b""
-    source_switched: str = ""  # 换源信息
+    cover: str = ""
+    lyrics: str = ""
+    duration: int = 0
+    file_size: int = 0
+    actual_quality: str = ""
+    was_downgraded: bool = False
     error: str = ""
-    need_fallback: bool = False  # 是否需要降级
-    actual_quality: str = ""  # 实际使用的音质
+    expire: int = 1800
+
+
+@dataclass
+class ToplistItem:
+    """排行榜项"""
+    id: str
+    name: str
+    pic: str = ""
+    update_frequency: str = ""
 
 
 class TuneHubClient:
-    """TuneHub API 客户端"""
+    """TuneHub V3 API 客户端"""
 
-    def __init__(self, base_url: str = API_BASE_URL):
+    def __init__(self, base_url: str = API_BASE_URL, api_key: str = API_KEY):
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
         self._session: Optional[aiohttp.ClientSession] = None
+        # 缓存方法配置
+        self._method_cache: dict[str, dict] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建 aiohttp Session"""
@@ -56,205 +72,306 @@ class TuneHubClient:
             await self._session.close()
             self._session = None
 
-    async def _request(
-        self,
-        params: dict,
-        allow_redirects: bool = True
-    ) -> aiohttp.ClientResponse:
+    def _get_headers(self) -> dict:
+        """获取请求头（包含认证）"""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        return headers
+
+    async def _request(self, method: str, url: str, **kwargs) -> dict:
         """发送请求"""
         session = await self._get_session()
-        url = f"{self.base_url}/api/"
-        logger.debug(f"API 请求: {url} params={params}")
-        resp = await session.get(url, params=params, allow_redirects=allow_redirects)
+        logger.debug(f"API 请求: {method} {url}")
+        resp = await session.request(method, url, **kwargs)
         logger.debug(f"API 响应: status={resp.status}")
-        return resp
+        data = await resp.json()
+        return data
 
-    # ==================== 搜索 ====================
+    # ==================== 解析接口（消耗积分）===================
 
-    async def aggregate_search(self, keyword: str) -> list[dict]:
-        """聚合搜索"""
-        try:
-            resp = await self._request({
-                "type": "aggregateSearch",
-                "keyword": keyword
-            })
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            if data.get("code") != 200:
-                return []
-            return data.get("data", {}).get("results", [])
-        except Exception as e:
-            logger.warning(f"聚合搜索失败: {e}")
-            return []
-
-    async def search(self, source: str, keyword: str, limit: int = 20) -> list[dict]:
-        """单平台搜索"""
-        try:
-            resp = await self._request({
-                "source": source,
-                "type": "search",
-                "keyword": keyword,
-                "limit": limit
-            })
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            if data.get("code") != 200:
-                return []
-            return data.get("data", {}).get("results", [])
-        except Exception as e:
-            logger.warning(f"单平台搜索失败: {e}")
-            return []
-
-    # ==================== 歌曲信息 ====================
-
-    async def get_song_info(self, source: str, song_id: str) -> Optional[SongInfo]:
-        """获取歌曲元数据"""
-        try:
-            resp = await self._request({
-                "source": source,
-                "id": song_id,
-                "type": "info"
-            })
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            if data.get("code") != 200:
-                return None
-            info = data.get("data", {})
-            return SongInfo(
-                source=source,
-                song_id=song_id,
-                name=info.get("name", "未知歌曲"),
-                artist=info.get("artist", "未知歌手"),
-                album=info.get("album", ""),
-                pic_url=info.get("pic", ""),
-                lrc_url=info.get("lrc", ""),
-                url=info.get("url", "")
-            )
-        except Exception as e:
-            logger.warning(f"获取歌曲信息失败: {e}")
-            return None
-
-    # ==================== 资源获取 ====================
-
-    async def resolve_audio_url(
+    async def parse_songs(
         self,
-        source: str,
-        song_id: str,
+        platform: str,
+        song_ids: str,
         quality: str = "320k"
-    ) -> AudioResult:
-        """获取音频真实 URL（处理 302 重定向）"""
-        try:
-            logger.debug(f"请求音频: source={source}, id={song_id}, quality={quality}")
-            resp = await self._request(
-                {
-                    "source": source,
-                    "id": song_id,
-                    "type": "url",
-                    "br": quality
-                },
-                allow_redirects=False
-            )
-
-            # 检查换源
-            source_switched = resp.headers.get("X-Source-Switch", "")
-            logger.debug(f"音频响应: status={resp.status}, switched={source_switched}")
-
-            if resp.status == 302:
-                location = resp.headers.get("Location", "")
-                if location:
-                    # 检查文件大小
-                    size = await self._get_content_length(location)
-                    need_fallback = size > MAX_FILE_SIZE
-                    logger.debug(f"音频 URL: {location[:100]}..., size={size}")
-                    return AudioResult(
-                        success=True,
-                        url=location,
-                        size=size,
-                        source_switched=source_switched,
-                        need_fallback=need_fallback
-                    )
-            elif resp.status == 200:
-                # 有些情况可能直接返回 URL
-                data = await resp.json()
-                url = data.get("data", {}).get("url", "")
-                if url:
-                    size = await self._get_content_length(url)
-                    return AudioResult(
-                        success=True,
-                        url=url,
-                        size=size,
-                        source_switched=source_switched,
-                        need_fallback=size > MAX_FILE_SIZE
-                    )
-                else:
-                    # API 返回 200 但无 URL，可能该品质不可用
-                    error_msg = data.get("msg", "") or data.get("message", "") or "该品质不可用"
-                    logger.warning(f"音频解析失败: {error_msg}, data={data}")
-                    return AudioResult(success=False, error=error_msg, need_fallback=True)
-            else:
-                # 非预期状态码
-                try:
-                    error_data = await resp.text()
-                    logger.warning(f"音频请求失败: status={resp.status}, body={error_data[:200]}")
-                except Exception:
-                    pass
-                return AudioResult(success=False, error=f"HTTP {resp.status}", need_fallback=True)
-
-            return AudioResult(success=False, error="无法获取音频链接", need_fallback=True)
-        except Exception as e:
-            logger.warning(f"获取音频 URL 失败: {e}", exc_info=True)
-            return AudioResult(success=False, error=str(e))
-
-    async def get_audio_with_fallback(
-        self,
-        source: str,
-        song_id: str,
-        quality: str = "320k",
-        skip_size_check: bool = False
-    ) -> AudioResult:
-        """获取音频，超限或不可用时自动降级
+    ) -> list[ParseResult]:
+        """解析歌曲（POST /v1/parse）
 
         Args:
-            source: 音源平台
-            song_id: 歌曲 ID
-            quality: 请求的音质
-            skip_size_check: 是否跳过文件大小检查（启用大文件上传时使用）
+            platform: 平台 (netease/kuwo/qq)
+            song_ids: 歌曲 ID，支持批量逗号分隔
+            quality: 音质
+
+        Returns:
+            ParseResult 列表
         """
-        # 品质降级顺序
-        quality_order = ["flac24bit", "flac", "320k", "128k"]
+        try:
+            url = f"{self.base_url}/v1/parse"
+            payload = {
+                "platform": platform,
+                "ids": song_ids,
+                "quality": quality
+            }
 
-        result = await self.resolve_audio_url(source, song_id, quality)
+            data = await self._request("POST", url, json=payload, headers=self._get_headers())
 
-        # 如果成功但需要降级（文件太大），且未跳过大小检查
-        if result.success and result.need_fallback and not skip_size_check:
-            try:
-                current_idx = quality_order.index(quality)
-                if current_idx < len(quality_order) - 1:
-                    next_quality = quality_order[current_idx + 1]
-                    logger.info(f"文件过大，降级到 {next_quality}")
-                    return await self.get_audio_with_fallback(source, song_id, next_quality, skip_size_check)
-            except ValueError:
-                pass
+            if data.get("code") != 0:
+                msg = data.get("message", "未知错误")
+                logger.warning(f"解析请求失败: {msg}")
+                return []
 
-        # 如果失败且需要降级（品质不可用）
-        if not result.success and result.need_fallback:
-            try:
-                current_idx = quality_order.index(quality)
-                if current_idx < len(quality_order) - 1:
-                    next_quality = quality_order[current_idx + 1]
-                    logger.info(f"品质 {quality} 不可用，降级到 {next_quality}")
-                    return await self.get_audio_with_fallback(source, song_id, next_quality, skip_size_check)
-            except ValueError:
-                pass
+            results = []
+            for item in data.get("data", {}).get("data", []):
+                if item.get("success"):
+                    info = item.get("info", {})
+                    results.append(ParseResult(
+                        success=True,
+                        song_id=item.get("id", ""),
+                        name=info.get("name", ""),
+                        artist=info.get("artist", ""),
+                        album=info.get("album", ""),
+                        url=item.get("url", ""),
+                        cover=item.get("cover", ""),
+                        lyrics=item.get("lyrics", ""),
+                        duration=info.get("duration", 0),
+                        file_size=item.get("fileSize", 0),
+                        actual_quality=item.get("actualQuality", ""),
+                        was_downgraded=item.get("wasDowngraded", False),
+                        expire=item.get("expire", 1800)
+                    ))
+                else:
+                    results.append(ParseResult(
+                        success=False,
+                        song_id=item.get("id", ""),
+                        error=item.get("error", "解析失败")
+                    ))
+            return results
 
-        # 设置实际使用的音质
-        if result.success:
-            result.actual_quality = quality
+        except aiohttp.ClientError as e:
+            logger.warning(f"网络请求错误: {e}")
+            return []
+        except (KeyError, TypeError, ValueError) as e:
+            logger.warning(f"数据解析错误: {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"解析失败: {e}", exc_info=True)
+            return []
 
+    # ==================== 方法下发模式（不消耗积分）===================
+
+    async def get_method_config(self, platform: str, function: str) -> Optional[dict]:
+        """获取方法配置（GET /v1/methods/{platform}/{function}）"""
+        cache_key = f"{platform}_{function}"
+        if cache_key in self._method_cache:
+            return self._method_cache[cache_key]
+
+        try:
+            url = f"{self.base_url}/v1/methods/{platform}/{function}"
+            data = await self._request("GET", url, headers=self._get_headers())
+
+            if data.get("code") == 0:
+                config = data.get("data")
+                self._method_cache[cache_key] = config
+                return config
+            return None
+
+        except Exception as e:
+            logger.warning(f"获取方法配置失败: {e}")
+            return None
+
+    def _replace_template_vars(self, template: str, variables: dict) -> str:
+        """替换模板变量"""
+        result = template
+        for key, value in variables.items():
+            # 替换 {{key}} 和 {key} 格式
+            result = result.replace(f"{{{{{key}}}}}", str(value))  # 双花括号 {{key}}
+            result = result.replace(f"{{{key}}}", str(value))      # 单花括号 {key}
         return result
+
+    def _execute_transform(self, transform_func: str, response_data: dict) -> list:
+        """执行 JS transform 函数"""
+        # 安全检查：验证 transform 函数不包含危险操作
+        dangerous_patterns = [
+            'eval(', 'Function(', 'setTimeout(', 'setInterval(',
+            'require(', 'import ', 'process.', 'child_process',
+            'fs.', 'http.', 'https.', 'child_process'
+        ]
+
+        for pattern in dangerous_patterns:
+            if pattern.lower() in transform_func.lower():
+                logger.warning(f"Transform 函数包含危险内容: {pattern}")
+                return []
+
+        try:
+            ctx = execjs.compile(transform_func)
+            return ctx.call("response", response_data)
+        except Exception as e:
+            logger.warning(f"执行 transform 失败: {e}")
+            return []
+
+    async def execute_method(
+        self,
+        config: dict,
+        variables: dict
+    ) -> list:
+        """执行方法下发请求
+
+        Args:
+            config: get_method_config 返回的配置
+            variables: 模板变量值
+
+        Returns:
+            转换后的结果列表
+        """
+        try:
+            # 构建 URL（替换模板变量）
+            url = config.get("url", "")
+            url = self._replace_template_vars(url, variables)
+
+            # 构建查询参数
+            params = {}
+            for key, value in config.get("params", {}).items():
+                if isinstance(value, str):
+                    value = self._replace_template_vars(value, variables)
+                params[key] = value
+
+            headers = config.get("headers", {})
+            method = config.get("method", "GET")
+
+            session = await self._get_session()
+
+            if method == "GET":
+                resp = await session.get(url, params=params, headers=headers)
+            else:
+                # POST 请求
+                body = config.get("body", {})
+                # 替换 body 中的模板变量
+                if isinstance(body, dict):
+                    body = {k: self._replace_template_vars(str(v), variables) if isinstance(v, str) else v for k, v in body.items()}
+                resp = await session.request(method, url, json=body, params=params, headers=headers)
+
+            response_data = await resp.json()
+
+            # 执行 transform 转换
+            transform_func = config.get("transform", "")
+            if transform_func:
+                return self._execute_transform(transform_func, response_data)
+
+            return response_data if isinstance(response_data, list) else []
+
+        except Exception as e:
+            logger.warning(f"执行方法失败: {e}")
+            return []
+
+    # ==================== 搜索功能 ====================
+
+    async def search(
+        self,
+        platform: str,
+        keyword: str,
+        page: int = 1,
+        limit: int = 20
+    ) -> list[SearchResult]:
+        """搜索歌曲"""
+        config = await self.get_method_config(platform, "search")
+        if not config:
+            return []
+
+        results = await self.execute_method(config, {
+            "keyword": keyword,
+            "page": page,
+            "limit": limit
+        })
+
+        return [SearchResult(**r, platform=platform) for r in results]
+
+    async def aggregate_search(self, keyword: str) -> list[SearchResult]:
+        """聚合搜索（并发搜索所有平台）"""
+        tasks = []
+        platforms = list(PLATFORMS.keys())
+        for platform in platforms:
+            tasks.append(self.search(platform, keyword))
+
+        platform_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_results = []
+        for platform, results in zip(platforms, platform_results):
+            if isinstance(results, Exception):
+                logger.warning(f"搜索 {platform} 失败: {results}")
+                continue
+            for r in results:
+                r.platform = platform
+                all_results.append(r)
+
+        # 去重（按 platform + id，保留第一个匹配）
+        seen = {}
+        unique_results = []
+        for r in all_results:
+            key = (r.platform, r.id)
+            if key not in seen:
+                seen[key] = True
+                unique_results.append(r)
+
+        return unique_results
+
+    # ==================== 排行榜功能 ====================
+
+    async def get_toplists(self, platform: str) -> list[ToplistItem]:
+        """获取排行榜列表"""
+        config = await self.get_method_config(platform, "toplists")
+        if not config:
+            return []
+
+        results = await self.execute_method(config, {})
+
+        return [ToplistItem(**r) for r in results]
+
+    async def get_toplist_songs(self, platform: str, list_id: str) -> list[SearchResult]:
+        """获取榜单歌曲"""
+        config = await self.get_method_config(platform, "toplist")
+        if not config:
+            return []
+
+        # 替换 URL 中的 id 占位符
+        url = config.get("url", "")
+        url = url.replace("{{id}}", list_id).replace("{id}", list_id)
+        config["url"] = url
+
+        results = await self.execute_method(config, {"id": list_id})
+
+        return [SearchResult(**r, platform=platform) for r in results]
+
+    # ==================== 歌单功能 ====================
+
+    async def get_playlist(self, platform: str, playlist_id: str) -> dict:
+        """获取歌单详情"""
+        config = await self.get_method_config(platform, "playlist")
+        if not config:
+            return {}
+
+        # 替换 URL 中的 id 占位符
+        url = config.get("url", "")
+        url = url.replace("{{id}}", playlist_id).replace("{id}", playlist_id)
+        config["url"] = url
+
+        result = await self.execute_method(config, {"id": playlist_id})
+
+        return result if result else {}
+
+    # ==================== 下载功能 ====================
+
+    async def download_bytes(self, url: str) -> bytes:
+        """下载通用内容（封面等）"""
+        try:
+            session = await self._get_session()
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                return b""
+        except Exception as e:
+            logger.warning(f"下载失败: {e}")
+            return b""
 
     async def download_audio(
         self,
@@ -271,7 +388,6 @@ class TuneHubClient:
             max_retries: 最大重试次数
             timeout: 下载超时时间（秒）
         """
-        # 某些源可能需要特定的 headers
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
@@ -284,12 +400,11 @@ class TuneHubClient:
             try:
                 logger.debug(f"开始下载 (尝试 {attempt}/{max_retries}): {url[:100]}...")
 
-                # 使用独立的超时配置
                 download_timeout = aiohttp.ClientTimeout(total=timeout, connect=30)
                 async with aiohttp.ClientSession(timeout=download_timeout) as download_session:
                     async with download_session.get(url, headers=headers) as resp:
                         if resp.status != 200:
-                            logger.warning(f"下载失败: HTTP {resp.status}, url={url[:100]}")
+                            logger.warning(f"下载失败: HTTP {resp.status}")
                             if attempt < max_retries:
                                 await asyncio.sleep(2)
                                 continue
@@ -300,7 +415,7 @@ class TuneHubClient:
                         downloaded = 0
                         chunks = []
 
-                        async for chunk in resp.content.iter_chunked(64 * 1024):  # 64KB chunks
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
                             chunks.append(chunk)
                             downloaded += len(chunk)
                             if progress_callback and total > 0:
@@ -311,7 +426,7 @@ class TuneHubClient:
                         return result
 
             except asyncio.TimeoutError:
-                logger.warning(f"下载超时 (尝试 {attempt}/{max_retries}): {url[:100]}")
+                logger.warning(f"下载超时 (尝试 {attempt}/{max_retries})")
                 if attempt < max_retries:
                     await asyncio.sleep(2)
                     continue
@@ -325,70 +440,7 @@ class TuneHubClient:
 
         return b""
 
-    async def get_cover(self, source: str, song_id: str) -> bytes:
-        """获取封面图片"""
-        try:
-            # 先尝试通过 API 获取封面 URL
-            resp = await self._request(
-                {"source": source, "id": song_id, "type": "pic"},
-                allow_redirects=False
-            )
-
-            if resp.status == 302:
-                # 如果是重定向，获取真实 URL 并下载
-                pic_url = resp.headers.get("Location", "")
-                if pic_url:
-                    logger.debug(f"封面重定向: {pic_url[:80]}...")
-                    session = await self._get_session()
-                    async with session.get(pic_url) as pic_resp:
-                        if pic_resp.status == 200:
-                            content_type = pic_resp.headers.get("Content-Type", "")
-                            if "image" in content_type:
-                                return await pic_resp.read()
-                            else:
-                                logger.debug(f"封面非图片类型: {content_type}")
-                        else:
-                            logger.debug(f"封面下载失败: HTTP {pic_resp.status}")
-            elif resp.status == 200:
-                content_type = resp.headers.get("Content-Type", "")
-                if "image" in content_type:
-                    return await resp.read()
-                else:
-                    # 可能是 JSON 响应包含 URL
-                    try:
-                        data = await resp.json()
-                        pic_url = data.get("data", {}).get("url", "") or data.get("data", {}).get("pic", "")
-                        if pic_url:
-                            logger.debug(f"封面 URL: {pic_url[:80]}...")
-                            session = await self._get_session()
-                            async with session.get(pic_url) as pic_resp:
-                                if pic_resp.status == 200:
-                                    return await pic_resp.read()
-                    except Exception:
-                        pass
-            else:
-                logger.debug(f"获取封面失败: HTTP {resp.status}")
-
-            return b""
-        except Exception as e:
-            logger.warning(f"获取封面失败: {e}")
-            return b""
-
-    async def get_lyrics(self, source: str, song_id: str) -> str:
-        """获取歌词"""
-        try:
-            resp = await self._request(
-                {"source": source, "id": song_id, "type": "lrc"},
-                allow_redirects=True
-            )
-            if resp.status == 200:
-                return await resp.text()
-            return ""
-        except Exception as e:
-            logger.warning(f"获取歌词失败: {e}")
-            return ""
-
-    async def _get_content_length(self, url: str) -> int:
+    async def get_file_size(self, url: str) -> int:
         """获取文件大小"""
         try:
             session = await self._get_session()
@@ -398,61 +450,6 @@ class TuneHubClient:
         except Exception as e:
             logger.warning(f"获取文件大小失败: {e}")
             return 0
-
-    # ==================== 排行榜与歌单 ====================
-
-    async def get_toplists(self, source: str) -> list[dict]:
-        """获取排行榜列表"""
-        try:
-            resp = await self._request({
-                "source": source,
-                "type": "toplists"
-            })
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            if data.get("code") != 200:
-                return []
-            return data.get("data", {}).get("list", [])
-        except Exception as e:
-            logger.warning(f"获取排行榜失败: {e}")
-            return []
-
-    async def get_toplist_songs(self, source: str, list_id: str) -> dict:
-        """获取排行榜歌曲"""
-        try:
-            resp = await self._request({
-                "source": source,
-                "id": list_id,
-                "type": "toplist"
-            })
-            if resp.status != 200:
-                return {}
-            data = await resp.json()
-            if data.get("code") != 200:
-                return {}
-            return data.get("data", {})
-        except Exception as e:
-            logger.warning(f"获取排行榜歌曲失败: {e}")
-            return {}
-
-    async def get_playlist(self, source: str, playlist_id: str) -> dict:
-        """获取歌单详情"""
-        try:
-            resp = await self._request({
-                "source": source,
-                "id": playlist_id,
-                "type": "playlist"
-            })
-            if resp.status != 200:
-                return {}
-            data = await resp.json()
-            if data.get("code") != 200:
-                return {}
-            return data.get("data", {})
-        except Exception as e:
-            logger.warning(f"获取歌单失败: {e}")
-            return {}
 
 
 # 全局客户端实例
