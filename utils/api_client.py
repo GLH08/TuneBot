@@ -204,8 +204,20 @@ class TuneHubClient:
                 return []
 
         try:
-            ctx = execjs.compile(transform_func)
-            return ctx.call("response", response_data)
+            # API 返回的是匿名函数 function(response){...}
+            # 需要包装成命名函数才能被 execjs 调用
+            if transform_func.strip().startswith('function('):
+                # 将 function(response) 改为 function transform(response)
+                wrapped_func = 'function transform' + transform_func.strip()[8:]
+            elif transform_func.strip().startswith('function '):
+                # 已经是命名函数
+                wrapped_func = transform_func
+            else:
+                # 其他情况，尝试包装
+                wrapped_func = f"function transform(response) {{ return ({transform_func})(response); }}"
+
+            ctx = execjs.compile(wrapped_func)
+            return ctx.call("transform", response_data)
         except Exception as e:
             logger.warning(f"执行 transform 失败: {e}")
             return []
