@@ -314,10 +314,12 @@ class TuneHubClient:
                 else:
                     params[key] = value
 
-            logger.debug(f"最终请求: {method} {url} params={params}")
+            logger.debug(f"参数处理完成，共 {len(params)} 个参数")
 
             headers = config.get("headers", {})
             method = config.get("method", "GET")
+
+            logger.debug(f"最终请求: {method} {url} params={params}")
 
             session = await self._get_session()
 
