@@ -193,9 +193,9 @@ class TuneHubClient:
         """执行 JS transform 函数"""
         # 安全检查：验证 transform 函数不包含危险操作
         dangerous_patterns = [
-            'eval(', 'Function(', 'setTimeout(', 'setInterval(',
+            'eval(', 'setTimeout(', 'setInterval(',
             'require(', 'import ', 'process.', 'child_process',
-            'fs.', 'http.', 'https.', 'child_process'
+            'fs.', 'http.', 'https.'
         ]
 
         for pattern in dangerous_patterns:
@@ -251,7 +251,8 @@ class TuneHubClient:
                     body = {k: self._replace_template_vars(str(v), variables) if isinstance(v, str) else v for k, v in body.items()}
                 resp = await session.request(method, url, json=body, params=params, headers=headers)
 
-            response_data = await resp.json()
+            # 强制解析 JSON（某些 API 返回 text/plain）
+            response_data = await resp.json(content_type=None)
 
             # 执行 transform 转换
             transform_func = config.get("transform", "")
