@@ -168,12 +168,14 @@ class TuneHubClient:
 
         try:
             url = f"{self.base_url}/v1/methods/{platform}/{function}"
+            logger.debug(f"获取方法配置: {url}")
             data = await self._request("GET", url, headers=self._get_headers())
 
             if data.get("code") == 0:
                 config = data.get("data")
                 self._method_cache[cache_key] = config
                 return config
+            logger.warning(f"获取方法配置失败: code={data.get('code')}, message={data.get('message')}")
             return None
 
         except Exception as e:
@@ -287,8 +289,10 @@ class TuneHubClient:
         limit: int = 20
     ) -> list[SearchResult]:
         """搜索歌曲"""
+        logger.debug(f"搜索: platform={platform}, keyword={keyword}")
         config = await self.get_method_config(platform, "search")
         if not config:
+            logger.warning(f"未获取到 {platform} 搜索配置")
             return []
 
         results = await self.execute_method(config, {
@@ -296,6 +300,7 @@ class TuneHubClient:
             "page": page,
             "limit": limit
         })
+        logger.debug(f"搜索结果: {platform} 返回 {len(results)} 条")
 
         return [SearchResult(**r, platform=platform) for r in results]
 
@@ -303,6 +308,7 @@ class TuneHubClient:
         """聚合搜索（并发搜索所有平台）"""
         tasks = []
         platforms = list(PLATFORMS.keys())
+        logger.info(f"聚合搜索: keyword={keyword}, platforms={platforms}")
         for platform in platforms:
             tasks.append(self.search(platform, keyword))
 
