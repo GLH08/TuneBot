@@ -219,7 +219,9 @@ class TuneHubClient:
                 wrapped_func = f"function transform(response) {{ return ({transform_func})(response); }}"
 
             ctx = execjs.compile(wrapped_func)
-            return ctx.call("transform", response_data)
+            result = ctx.call("transform", response_data)
+            logger.debug(f"Transform 执行成功，返回 {len(result) if isinstance(result, list) else 'non-list'} 条")
+            return result if isinstance(result, list) else []
         except Exception as e:
             logger.warning(f"执行 transform 失败: {e}")
             return []
@@ -267,11 +269,15 @@ class TuneHubClient:
 
             # 强制解析 JSON（某些 API 返回 text/plain）
             response_data = await resp.json(content_type=None)
+            logger.debug(f"API 原始响应类型: {type(response_data).__name__}, 键: {list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}")
 
             # 执行 transform 转换
             transform_func = config.get("transform", "")
             if transform_func:
-                return self._execute_transform(transform_func, response_data)
+                result = self._execute_transform(transform_func, response_data)
+                if not result:
+                    logger.warning(f"Transform 返回空结果，原始数据前200字符: {str(response_data)[:200]}")
+                return result
 
             return response_data if isinstance(response_data, list) else []
 
@@ -302,7 +308,17 @@ class TuneHubClient:
         })
         logger.debug(f"搜索结果: {platform} 返回 {len(results)} 条")
 
-        return [SearchResult(**r, platform=platform) for r in results]
+        # 字段映射
+        songs = []
+        for r in results:
+            songs.append(SearchResult(
+                id=str(r.get("id", "")),
+                name=r.get("name", ""),
+                artist=r.get("artist", ""),
+                album=r.get("album", ""),
+                platform=platform
+            ))
+        return songs
 
     async def aggregate_search(self, keyword: str) -> list[SearchResult]:
         """聚合搜索（并发搜索所有平台）"""
@@ -344,7 +360,16 @@ class TuneHubClient:
 
         results = await self.execute_method(config, {})
 
-        return [ToplistItem(**r) for r in results]
+        # 字段名映射：API 返回 camelCase，dataclass 使用 snake_case
+        toplists = []
+        for r in results:
+            toplists.append(ToplistItem(
+                id=r.get("id", ""),
+                name=r.get("name", ""),
+                pic=r.get("pic", ""),
+                update_frequency=r.get("updateFrequency", r.get("update_frequency", ""))
+            ))
+        return toplists
 
     async def get_toplist_songs(self, platform: str, list_id: str) -> list[SearchResult]:
         """获取榜单歌曲"""
@@ -359,7 +384,17 @@ class TuneHubClient:
 
         results = await self.execute_method(config, {"id": list_id})
 
-        return [SearchResult(**r, platform=platform) for r in results]
+        # 字段映射
+        songs = []
+        for r in results:
+            songs.append(SearchResult(
+                id=str(r.get("id", "")),
+                name=r.get("name", ""),
+                artist=r.get("artist", ""),
+                album=r.get("album", ""),
+                platform=platform
+            ))
+        return songs
 
     # ==================== 歌单功能 ====================
 
