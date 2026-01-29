@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import logging
 import execjs
+import re
 from typing import Optional
 from dataclasses import dataclass
 
@@ -183,12 +184,69 @@ class TuneHubClient:
             return None
 
     def _replace_template_vars(self, template: str, variables: dict) -> str:
-        """替换模板变量"""
+        """替换模板变量，支持 JS 表达式
+
+        支持的格式：
+        - {{key}} - 简单变量替换
+        - {{key || default}} - 默认值语法
+        - {{(page || 1) - 1}} - 算术表达式
+        """
         result = template
+
+        # 第一步：简单变量替换 {{key}} 和 {key}
         for key, value in variables.items():
-            # 替换 {{key}} 和 {key} 格式
-            result = result.replace(f"{{{{{key}}}}}", str(value))  # 双花括号 {{key}}
-            result = result.replace(f"{{{key}}}", str(value))      # 单花括号 {key}
+            result = result.replace(f"{{{{{key}}}}}", str(value))
+            result = result.replace(f"{{{key}}}", str(value))
+
+        # 第二步：处理 JS 表达式 {{expr}}
+        # 匹配 {{expr}} 模式，使用 execjs 安全地计算表达式
+        pattern = r'\{\{([^}]+)\}\}'
+
+        def replace_js_expr(match):
+            js_expr = match.group(1).strip()
+            if not js_expr:
+                return match.group(0)
+
+            try:
+                # 安全检查：排除危险操作
+                dangerous = ['eval(', 'setTimeout(', 'setInterval(', 'require(', 'import ',
+                           'process.', 'child_process', 'fs.', 'http.', 'https.']
+                for d in dangerous:
+                    if d.lower() in js_expr.lower():
+                        logger.warning(f"JS 表达式包含危险内容: {d}")
+                        return match.group(0)
+
+                # 构建 JavaScript 代码来计算表达式
+                # 创建变量环境
+                js_vars = []
+                for key, value in variables.items():
+                    # JavaScript 变量名只能是字母、数字、下划线、$
+                    safe_key = re.sub(r'[^a-zA-Z_$]', '_', key)
+                    if isinstance(value, str):
+                        js_vars.append(f"var {safe_key} = '{value}';")
+                    elif isinstance(value, bool):
+                        js_vars.append(f"var {safe_key} = {str(value).lower()};")
+                    elif value is None:
+                        js_vars.append(f"var {safe_key} = undefined;")
+                    else:
+                        js_vars.append(f"var {safe_key} = {value};")
+
+                js_code = f"""
+                (function() {{
+                    {' '.join(js_vars)}
+                    return {js_expr};
+                }})()
+                """
+
+                # 使用 execjs.eval 直接执行
+                result_value = execjs.eval(js_code)
+                return str(int(result_value) if isinstance(result_value, float) and result_value == int(result_value) else result_value)
+
+            except Exception as e:
+                logger.warning(f"计算 JS 表达式失败: {js_expr}, error: {e}")
+                return match.group(0)
+
+        result = re.sub(pattern, replace_js_expr, result)
         return result
 
     def _execute_transform(self, transform_func: str, response_data: dict) -> list:
@@ -244,13 +302,19 @@ class TuneHubClient:
             # 构建 URL（替换模板变量）
             url = config.get("url", "")
             url = self._replace_template_vars(url, variables)
+            logger.debug(f"构建 URL: {url}")
 
             # 构建查询参数
             params = {}
             for key, value in config.get("params", {}).items():
                 if isinstance(value, str):
-                    value = self._replace_template_vars(value, variables)
-                params[key] = value
+                    processed_value = self._replace_template_vars(value, variables)
+                    params[key] = processed_value
+                    logger.debug(f"参数 {key}: {value} -> {processed_value}")
+                else:
+                    params[key] = value
+
+            logger.debug(f"最终请求: {method} {url} params={params}")
 
             headers = config.get("headers", {})
             method = config.get("method", "GET")
@@ -270,6 +334,11 @@ class TuneHubClient:
             # 强制解析 JSON（某些 API 返回 text/plain）
             response_data = await resp.json(content_type=None)
             logger.debug(f"API 原始响应类型: {type(response_data).__name__}, 键: {list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}")
+
+            # 检查 API 错误响应
+            if isinstance(response_data, dict) and response_data.get("code") != 0:
+                logger.warning(f"API 返回错误: code={response_data.get('code')}, msg={response_data.get('msg', '未知错误')}")
+                return []
 
             # 执行 transform 转换
             transform_func = config.get("transform", "")
