@@ -10,7 +10,8 @@ services:
       - ARCHIVE_CHANNEL_ID=${ARCHIVE_CHANNEL_ID}
       - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
       - DEFAULT_QUALITY=${DEFAULT_QUALITY:-320k}
-      - API_BASE_URL=${API_BASE_URL:-https://music-dl.sayqz.com}
+      - API_BASE_URL=${API_BASE_URL:-https://tunehub.sayqz.com/api}
+      - API_KEY=${API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - tunebot_data:/app/data
