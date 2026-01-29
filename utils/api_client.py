@@ -251,6 +251,11 @@ class TuneHubClient:
 
     def _execute_transform(self, transform_func: str, response_data: dict) -> list:
         """执行 JS transform 函数"""
+        import json
+        import subprocess
+        import tempfile
+        import os
+
         # 安全检查：验证 transform 函数不包含危险操作
         dangerous_patterns = [
             'eval(', 'setTimeout(', 'setInterval(',
@@ -264,22 +269,73 @@ class TuneHubClient:
                 return []
 
         try:
-            # API 返回的是匿名函数 function(response){...}
-            # 需要包装成命名函数才能被 execjs 调用
-            if transform_func.strip().startswith('function('):
-                # 将 function(response) 改为 function transform(response)
-                wrapped_func = 'function transform' + transform_func.strip()[8:]
-            elif transform_func.strip().startswith('function '):
-                # 已经是命名函数
-                wrapped_func = transform_func
-            else:
-                # 其他情况，尝试包装
-                wrapped_func = f"function transform(response) {{ return ({transform_func})(response); }}"
+            # 提取函数体
+            func_body = transform_func.strip()
+            paren_start = func_body.find('(')
+            if paren_start == -1:
+                logger.warning(f"Transform 函数格式错误")
+                return []
 
-            ctx = execjs.compile(wrapped_func)
-            result = ctx.call("transform", response_data)
-            logger.debug(f"Transform 执行成功，返回 {len(result) if isinstance(result, list) else 'non-list'} 条")
-            return result if isinstance(result, list) else []
+            brace_start = func_body.find('{', paren_start)
+            if brace_start == -1:
+                logger.warning(f"Transform 函数格式错误")
+                return []
+
+            # 找到匹配的结束括号
+            brace_count = 1
+            body_end = brace_start + 1
+            while brace_count > 0 and body_end < len(func_body):
+                if func_body[body_end] == '{':
+                    brace_count += 1
+                elif func_body[body_end] == '}':
+                    brace_count -= 1
+                body_end += 1
+
+            actual_body = func_body[brace_start:body_end]
+            json_data = json.dumps(response_data)
+
+            # 构建 Node.js 脚本
+            js_script = f"const data = {json_data};\nconst result = (function(response) {{ {actual_body} }})(data);\nconsole.log(JSON.stringify(result));"
+
+            # 写入临时文件并执行
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8') as f:
+                f.write(js_script)
+                temp_file = f.name
+
+            try:
+                result = subprocess.run(
+                    ['node', temp_file],
+                    capture_output=True,
+                    timeout=30
+                )
+
+                if result.returncode != 0:
+                    stderr = result.stderr.decode('utf-8', errors='replace') if result.stderr else ''
+                    logger.warning(f"Node.js 执行失败: {stderr}")
+                    return []
+
+                if not result.stdout:
+                    logger.warning("Node.js 返回空结果")
+                    return []
+
+                output = result.stdout.decode('utf-8', errors='replace').strip()
+                if not output:
+                    logger.warning("Node.js 输出为空")
+                    return []
+
+                parsed = json.loads(output)
+                logger.debug(f"Transform 执行成功，返回 {len(parsed) if isinstance(parsed, list) else 'non-list'} 条")
+                return parsed if isinstance(parsed, list) else []
+
+            finally:
+                os.unlink(temp_file)
+
+        except subprocess.TimeoutExpired:
+            logger.warning("Node.js 执行超时")
+            return []
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON 解析失败: {e}")
+            return []
         except Exception as e:
             logger.warning(f"执行 transform 失败: {e}")
             return []
@@ -337,10 +393,14 @@ class TuneHubClient:
             response_data = await resp.json(content_type=None)
             logger.debug(f"API 原始响应类型: {type(response_data).__name__}, 键: {list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}")
 
-            # 检查 API 错误响应
-            if isinstance(response_data, dict) and response_data.get("code") != 0:
-                logger.warning(f"API 返回错误: code={response_data.get('code')}, msg={response_data.get('msg', '未知错误')}")
-                return []
+            # 检查 API 错误响应（仅当存在明确的错误码时才判定为错误）
+            # 不同 API 使用不同的成功码：code=0, code=200, 或无 code 字段
+            if isinstance(response_data, dict):
+                code = response_data.get("code")
+                # 常见的错误码：400, 401, 403, 404, 500, 502, 503 等
+                if code is not None and code >= 400:
+                    logger.warning(f"API 返回错误: code={code}, msg={response_data.get('msg', '未知错误')}")
+                    return []
 
             # 执行 transform 转换
             transform_func = config.get("transform", "")
